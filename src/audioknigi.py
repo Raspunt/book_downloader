@@ -8,31 +8,27 @@ import uuid
 from bs4 import BeautifulSoup
 import requests
 
+from checkpoint import Checkpoint
+
 
 
 class AudioKnigi():
     
-    def __init__(self):
-        self.save_folder = "books"
-        self.main_url = "https://audioknigi.pro/audioknigi/37558-igraty_-chtoby-vyghity-4-inferno.html"
+    def __init__(self,save_folder):
+        self.save_folder = save_folder
 
     def get_books_by_page(self,page):
-
-
-
         res = requests.get(f"https://audioknigi.pro/audioknigi/page/{page}/")
         soup = BeautifulSoup(res.text, "lxml")
 
         print(f"Открываю страницу {page}")
 
         books = []
-
         for a in soup.find_all("a",class_="name-kniga"):
             books.append({
                 "name":a.text.strip(),
                 "url": a["href"]
             })
-
         print(f"Вижу {len(books)} книг!")
 
         return books
@@ -83,35 +79,66 @@ class AudioKnigi():
 
     
     
+    def safe_filename(self, name: str) -> str:
+        return re.sub(r'[^a-zA-Zа-яА-Я0-9_\- ]', '_', name).strip()[:100]
+
     def download_playlist(self, playlist, title):
+        if not playlist:
+            print(f"[WARN] У книги '{title}' пустой плейлист, пропускаю")
+            return False
+
         os.makedirs(self.save_folder, exist_ok=True)
 
-        book_folder = os.path.join(self.save_folder, title)
+        safe_title = self.safe_filename(title)
+        book_folder = os.path.join(self.save_folder, safe_title)
         os.makedirs(book_folder, exist_ok=True)
 
+        success = True
         for mp3Book in playlist:
-            url = mp3Book["file"]
-            part_title = mp3Book["title"].replace(" ", "_")
+            url = mp3Book.get("file")
+            part_title = self.safe_filename(mp3Book.get("title", "part"))
             filename = f"{part_title}.mp3"
             path = os.path.join(book_folder, filename)
 
-            print(f"Скачиваю: {url} -> {path}")
-            with requests.get(url, stream=True) as r:
+            if os.path.exists(path) and os.path.getsize(path) > 1024:
+                print(f"[SKIP] {path} уже существует")
+                continue
+
+            try:
+                print(f"[DL] {url} -> {path}")
+                r = requests.get(url, stream=True, timeout=15)
                 r.raise_for_status()
+
                 with open(path, "wb") as f:
                     for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
+                        if chunk:
+                            f.write(chunk)
+
+                print(f"[OK] {filename}")
+            except Exception as e:
+                print(f"[ERR] {url}: {e}")
+                success = False
+
+        return success
 
 
+    def run(self, max_pages:int):
+        checkpoint = Checkpoint(self.save_folder)
+        checkpoint_list = checkpoint.load_checkpoint()
 
+        for i in range(1,max_pages):
+            books = self.get_books_by_page(i)
 
-ak = AudioKnigi()
+            for book in books:
 
-for i in range(1,1000):
-    books = ak.get_books_by_page(i)
+                if book['url'] in checkpoint_list:
+                    print(f"[SKIP] {book['url']} уже в чекпоинте")
+                    continue
 
-    for book in books:
-        playlist = ak.get_playlist(book['url'])
-        ak.download_playlist(playlist,book['name'])
+                playlist = self.get_playlist(book['url'])
+                self.download_playlist(playlist,book['name'])
 
-        
+                checkpoint_list.add(book['url'])
+                checkpoint.save_checkpoint(checkpoint_list)
+
+                
